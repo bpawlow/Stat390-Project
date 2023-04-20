@@ -160,3 +160,4 @@ data <-
 
 
 write_csv(data, "~/Desktop/Stat390-Project/project_data_v4.csv")
+
