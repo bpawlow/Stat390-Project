@@ -4,6 +4,8 @@ Purpose of the project:
 
 ● To assess equity of access across age, ethnicity, and program category.
 
+Dataset Information:
+
 Our data is collected within the My CHI. My Future. network where organizations can upload their program information on the MCMF App. This app provides youth a seamless portal to find their passions and possibilities from their phone and access thousands of opportunities. The MCMF website is also used to find featured opportunities for prospective participants. The dataset includes the following relevant information:
 
 ● Programs (5 days or more, recurring)
