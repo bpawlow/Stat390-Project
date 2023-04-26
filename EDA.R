@@ -3,14 +3,14 @@ library(skimr)
 library(tidymodels)
 
 
-data <- read_tsv("project_data_v2.csv") %>% janitor::clean_names() %>%
+data <- read_tsv("Data/project_data_v2.csv") %>% janitor::clean_names() %>%
   mutate(category_name = str_remove_all(category_name, "\\.(?!\\d{2,}$)") %>% 
            str_replace_all(",", ".") )
 
 skimr::skim_without_charts(data)
 
 chicago_race_income <-
-  (read_csv("chicago_race_income.csv") %>% janitor::clean_names())[1:78, 1:8]
+  (read_csv("Data/chicago_race_income.csv") %>% janitor::clean_names())[1:78, 1:8]
 
 chicago_race_income$community_area[chicago_race_income$community_area == "LITTLE VILLAGE"] <-
   "SOUTH LAWNDALE"
@@ -18,7 +18,7 @@ chicago_race_income$community_area[chicago_race_income$community_area == "LITTLE
 chicago_race_income$community_area[chicago_race_income$community_area == "BACK OF THE YARDS"] <-
   "NEW CITY"
 
-cluster_to_ca <- read_csv("cluster_to_community_area.csv")
+cluster_to_ca <- read_csv("Data/cluster_to_community_area.csv")
 
 
 
@@ -36,6 +36,11 @@ data <-
     capacity,
     min_age,
     max_age,
+    start_date,
+    end_date,
+    address,
+    city,
+    state,
     zipcode,
     latitude,
     longitude,
@@ -93,8 +98,9 @@ data <- data %>% mutate(median_household_income_bracket = as_factor(
   )
 ))
 
+## Bar graph of income by different program categories 
 ggplot(data, aes(median_household_income_bracket)) + 
-  geom_bar(aes(fill = category_name)) + coord_flip()
+  geom_bar(aes(fill = category_name)) + coord_flip() + theme_minimal()
 
 data %>% group_by(median_household_income_bracket) %>% summarize(n = n(),total_capacity = sum(capacity, na.rm = T))
 
@@ -132,7 +138,6 @@ left_join(
              )
 
 
-
 ggplot(chicago_race_income, aes(median_household_income_bracket)) + 
   geom_bar()
 
@@ -156,8 +161,3 @@ data <-
     simpson_diversity_index = 1 - ((black_prop ^ 2) + (white_prop ^ 2) + (hispanic_prop ^ 2) + (asian_prop ^ 2) + (other_prop^2)),
     gini_diversity_index = 1 - sqrt(((black_prop ^ 2) + (white_prop ^ 2) + (hispanic_prop ^ 2) + (asian_prop ^ 2) + (other_prop^2)))
   )
-
-
-
-write_csv(data, "~/Desktop/Stat390-Project/project_data_v4.csv")
-
