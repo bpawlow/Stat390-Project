@@ -20,7 +20,18 @@ Each program can include (but is not limited to) name, category, description, da
 
 Methods 
 
-TBD...
+● Exploratory Data Analysis
+
+● Data Visualizations of inequities across different geographic clusters, races, income levels, etc. 
+
+● Literature review of the effect of after school programs on educational outcomes:
+
+- Attendance in school
+- Educational Attainment
+- Among program participants only, students who were enrolled more than 1 year demonstrated a 7-percentile-point increase in state test scores per year of program engagement (https://doi.org/10.1002/jcop.22416)
+- Reduction in violence
+- Future Outcomes
+- Increase interest in education
 
 Results
 
