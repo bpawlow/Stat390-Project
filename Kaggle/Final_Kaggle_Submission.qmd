@@ -1,0 +1,2123 @@
+---
+title: "Kaggle Competition"
+author: "Team 2"
+format: html
+editor: visual
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+    highlight: tango
+subtitle: "Final Submission"
+---
+
+```{r, warning=FALSE,message=FALSE,echo=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(stacks)
+library(vip)
+library(doMC)
+library(rminer)
+registerDoMC(detectCores())
+getDoParWorkers()
+set.seed(3013)
+```
+
+## Data Cleaning
+### Reading in the data
+```{r data cleaning, warning=FALSE, message=FALSE,eval=FALSE}
+# Saving id numbers as a variable
+id <- (read_csv('data/train.csv'))$id %>% as_tibble() %>% rename(id = value)
+# load in the training data set
+train <- read_csv('data/train.csv') 
+# Remove duplicated columns in the training data set
+train <- train[!duplicated(as.list(train))]
+```
+
+### Searching for categorical variables
+```{r, message=FALSE,warning=FALSE,eval=FALSE}
+for (i in colnames(train)) {
+  print(ggplot(train, aes_string(i)) + 
+    geom_histogram() + 
+    theme_minimal() + 
+    labs(title = i))
+}
+```
+
+ Variables that look categorical:
+ - x742 
+ - x727
+ - x725 
+ - x699 
+ - x658 
+ - x648 
+ - x617 
+ - x611 
+ - x586
+ - x577
+ - x556 
+ - x532 
+ - x423 
+ - x413 
+ - x312
+ - x303
+ - x190 
+ - x150
+ - x025
+
+```{r, warning = FALSE, message=FALSE, eval = FALSE}
+# Converting variables to categorical
+train <- train %>% mutate(
+  x742 = as_factor(x742),
+  x727 = as_factor(x727),
+  x725 = as_factor(x725),
+  x699 = as_factor(x699),
+  x658 = as_factor(x658),
+  x648 = as_factor(x648),
+  x617 = as_factor(x617),
+  x611 = as_factor(x611),
+  x586 = as_factor(x586),
+  x577 = as_factor(x577),
+  x556 = as_factor(x556),
+  x532 = as_factor(x532),
+  x423 = as_factor(x423),
+  x413 = as_factor(x413),
+  x312 = as_factor(x312),
+  x303 = as_factor(x303),
+  x190 = as_factor(x190),
+  x150 = as_factor(x150),
+  x025 = as_factor(x025)
+)
+```
+
+
+### Processing the data 
+```{r, warning=FALSE,message=FALSE, eval = FALSE}
+# Initial processing recipe so correlated variables and missingness can be accounted for
+processing_recipe <- recipe(y ~ ., train) %>%
+  step_rm(id) %>%
+  #filters columns with too much missingness
+  step_filter_missing(all_predictors(), threshold = .05) %>% 
+  # imputes missingess for categorical variables
+  step_impute_mode(all_nominal_predictors()) %>% 
+  # Converts factors to numerical
+  step_dummy(all_nominal_predictors()) %>% 
+  #Imputes missingness with knn method with 5 neighbors
+  step_impute_knn(all_predictors()) %>%
+  # Variables with low variance are removed
+  step_nzv(all_predictors()) %>%
+  # Correlated variables are removed
+  step_corr(all_predictors()) %>%
+  # All predictors are scaled and centered
+  step_normalize(all_predictors()) 
+
+# Creates a new training data set that will be explored in the EDA
+train <- processing_recipe %>% prep() %>% bake(train)
+
+```
+
+### The outcome variable
+```{r, warning = FALSE, message = FALSE, eval = FALSE}
+# Exploring the distribution of the y variable to handle outliers
+ggplot(train,aes(y)) +
+  geom_histogram() + 
+  theme_minimal() + 
+  theme(panel.grid = element_blank())
+
+
+ggplot(train,aes(log(y))) +
+  geom_histogram() + 
+  theme_minimal() + 
+  theme(panel.grid = element_blank())
+```
+
+```{r, warning = FALSE, message=FALSE, eval = FALSE}
+# based on the distributions above, the y variable will be logged
+train <- train %>% mutate(y = log(y))
+```
+
+\ 
+When trying to replicate the steps above the cleaning steps removed different versions of the duplicated columns. This threw off the rest of the analysis. For this reason, the provided code illustrates our data cleaning, but the saved training and testing data that was used when we originally did the Kaggle competition will be loaded later to run the model. The cleaning itself was not different, it was just the intrinsic nature of the data set made it hard to completely reproduce our cleaning process. 
+
+
+## Exploratory Data Analysis
+
+```{r, warning=FALSE,message=FALSE}
+
+```
+
+## Feature Selection/Reduction
+
+### Correlation Matrix
+
+```{r, warning=FALSE,message=FALSE,eval=FALSE}
+# Creates a correlation matrix with all the variables with the outcome variable
+cor_mat <- ((cor(train)))[,247] %>% 
+  # Converts to data frane ibject 
+  as.data.frame()
+
+cor_mat<-cor_mat %>% 
+  # We only care about the magnitude not the direction
+  mutate(y = abs(cor_mat$.)) %>%
+  # Weird formatting from data frame function, I needed to clean it up
+  select(y) %>% 
+  #Ranks it by high to low correlation
+  arrange(desc(y))
+# Displays correlations
+cor_mat
+# Gets the correlations in the right order
+cor_features <- (cor_mat %>% row.names())[2:31]
+```
+
+### Lasso Variable Selection
+
+```{r, warning=FALSE,message=FALSE,eval=FALSE}
+# Lasso feature Selection ----
+# Creates a recipe that will be used in the lasso model
+recipe <- recipe(y ~ ., train)
+# Defines the lasso model with the correct hyperparameters
+lasso_model <- linear_reg(mixture = 1, penalty = .01) %>%
+  set_engine("glmnet")
+# Defines the lasso workflow
+lasso_workflow <- workflow() %>%
+  add_model(lasso_model) %>%
+  add_recipe(recipe)
+
+# Results of the fit for the lasso workflow
+lasso_results <- fit(lasso_workflow, train)
+
+# Makes the results more readable
+lasso_tidy  <- tidy(lasso_results) %>%
+  # This gets rid of any of the coefficients that were unneeded
+    filter(estimate !=  0) %>%
+  # In this case, we only care about the variable's effect size not its direction
+    mutate(estimate = abs(estimate)) %>%
+  # Intercept is not useful in feature selection
+    filter(term != "(Intercept)") %>%
+  # Sorts them by most important to least important
+  arrange(desc(estimate))
+# Displays the results of the lasso model
+lasso_tidy
+# Saves the variables that are useful
+lasso_features <- (lasso_tidy$term)[1:30]
+```
+
+### RF feature Importance
+
+```{r, warning=FALSE,message=FALSE,eval=FALSE}
+# Creates a random forest model that will calculate variable importance
+rf_model <- 
+  rand_forest(
+    mode = "regression"
+  ) %>%
+  set_engine("ranger", importance = "impurity")
+
+# Creates random forest workflow
+rf_workflow <- 
+  workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(recipe)
+
+# Fits rf object
+rf_fit<- rf_workflow %>% 
+  fit(train)
+
+# Obtains variable importance
+rf_vi<- (rf_fit %>% extract_fit_parsnip() %>% vip::vi() %>% arrange(desc(Importance)))[1:30, ]
+
+
+# Saves list of top 30 variables according to importance
+rf_features <- (rf_vi %>% mutate(term = as.character(Variable) ))$term
+
+# Plots variable importance
+rf_fit %>%
+  extract_fit_parsnip() %>%
+  vip(num_features = 30)
+
+
+```
+
+### Boosted Tree Importance
+
+```{r, message=FALSE,warning=FALSE,eval=FALSE}
+
+bt_model <- boost_tree(
+  mode = "regression"
+) %>%
+  set_engine("xgboost")
+
+bt_workflow <- workflow() %>%
+  add_model(bt_model) %>%
+  add_recipe(recipe)
+
+bt_fit<- bt_workflow %>% 
+  fit(train)
+
+bt_vi <- xgboost::xgb.importance(model = bt_fit$fit$fit$fit) 
+
+
+bt_vi %>% xgboost::xgb.ggplot.importance(
+  top_n=30, measure=NULL, rel_to_first = F) 
+
+
+bt_features <- (bt_vi[1:30,1])$Feature
+
+
+```
+
+### SVM Importance
+
+```{r, warning = FALSE, message=FALSE,eval=FALSE}
+svm_model <- svm_rbf(
+  mode = "regression",
+) %>%
+  set_engine("kernlab")
+
+svm_workflow <- workflow() %>%
+  add_model(svm_model) %>%
+  add_recipe(recipe)
+
+
+svm_fit<- svm_workflow %>% 
+  fit(train)
+
+
+
+svm_vi <- svm_fit %>%
+  extract_fit_parsnip() %>%
+  vip::vi(
+    method = "permute",
+    target = "y",
+    metric = "rmse",
+    pred_wrapper = kernlab::predict,
+    train = train
+  )
+
+
+svm_fit %>%
+  extract_fit_parsnip() %>%
+  vip(method = "permute", 
+      target = "y", 
+      metric = "rmse",
+      pred_wrapper = kernlab::predict,
+      train = train,
+      num_features = 30
+  )
+
+
+
+svm_features <- svm_vi$Variable[1:30]
+
+
+
+```
+
+### First Round of Feature Selection
+
+```{r, warning=FALSE,message=FALSE,eval=FALSE}
+# 5 Choose 2 combinations
+bt_cor_features <- bt_features[bt_features %in% cor_features]
+bt_cor_features
+
+bt_lasso_features <- bt_features[bt_features %in% lasso_features]
+bt_lasso_features
+
+bt_rf_features <- bt_features[bt_features %in% rf_features]
+bt_rf_features
+
+bt_svm_features <- bt_features[bt_features %in% svm_features]
+bt_svm_features
+
+rf_cor_features <- rf_features[rf_features %in% cor_features]
+rf_cor_features
+
+rf_svm_features <- rf_features[rf_features %in% svm_features]
+rf_svm_features
+
+rf_lasso_features <- rf_features[rf_features %in% lasso_features]
+rf_lasso_features
+
+svm_cor_features <- svm_features[svm_features %in% cor_features]
+svm_cor_features
+
+svm_lasso_features <- svm_features[svm_features %in% lasso_features]
+svm_lasso_features
+
+lasso_cor_features <- lasso_features[lasso_features %in% cor_features]
+lasso_cor_features
+
+# 5 Choose 3 combinations
+bt_lasso_rf_features <- bt_lasso_features[bt_lasso_features %in% rf_features]
+bt_lasso_rf_features
+
+bt_lasso_svm_features <- bt_lasso_features[bt_lasso_features %in% svm_features]
+bt_lasso_svm_features
+
+bt_lasso_cor_features <- bt_lasso_features[bt_lasso_features %in% cor_features]
+bt_lasso_cor_features
+
+bt_rf_cor_features<-bt_rf_features[bt_rf_features %in% cor_features]
+bt_rf_cor_features
+
+bt_rf_svm_features<-bt_rf_features[bt_rf_features %in% svm_features]
+bt_rf_svm_features
+
+bt_svm_cor_features<-bt_svm_features[bt_svm_features %in% cor_features]
+bt_svm_cor_features
+
+rf_cor_lasso_features<-rf_cor_features[rf_cor_features %in% lasso_features]
+rf_cor_lasso_features
+
+rf_cor_svm_features<-rf_cor_features[rf_cor_features %in% svm_features]
+rf_cor_svm_features
+
+rf_lasso_svm_features<-rf_lasso_features[rf_lasso_features %in% svm_features]
+rf_lasso_svm_features
+
+lasso_cor_svm_features<-lasso_cor_features[lasso_cor_features %in% svm_features]
+lasso_cor_svm_features
+
+
+# 5 Choose 4 overlap
+bt_lasso_cor_rf_features<- bt_lasso_cor_features[bt_lasso_cor_features %in% rf_features]
+
+bt_lasso_cor_svm_features<- bt_lasso_cor_features[bt_lasso_cor_features %in% svm_features]
+
+bt_lasso_rf_svm_features<- bt_lasso_rf_features[bt_lasso_rf_features %in% svm_features]
+
+bt_rf_svm_cor_features<- bt_rf_svm_features[bt_rf_svm_features %in% cor_features]
+
+rf_lasso_svm_cor_features<- rf_lasso_svm_features[rf_lasso_svm_features %in% cor_features]
+
+
+# 5 Choose 5 overlap
+total_features_overlap <- bt_lasso_cor_rf_features[bt_lasso_cor_rf_features %in% svm_features]
+total_features_overlap
+
+# All variables 
+
+
+ff <-
+  c(
+    bt_lasso_features,
+    bt_rf_features,
+    bt_svm_features,
+    bt_cor_features,
+    rf_lasso_features,
+    rf_cor_features,
+    rf_svm_features,
+    svm_lasso_features,
+    svm_cor_features,
+    lasso_cor_features
+  ) %>% unique()
+
+
+```
+
+### Recursive Insertion
+
+```{r, warning=FALSE, message=FALSE,eval=FALSE}
+value_total_insertion <- tibble(var = character(), mean = numeric())
+
+insert <- train[,!(colnames(train)  %in% ff)] %>% select(-y)
+
+# Benchmark
+benchmark <- train %>% select(all_of(ff), y)
+
+
+
+recipe_benchmark <- recipe(y ~ .,
+                           benchmark)
+
+
+
+en_model <- 
+  linear_reg(mixture = tune(),
+             penalty = tune()) %>%
+  set_engine("glmnet")
+
+en_workflow <- workflow() %>%
+  add_model(en_model) %>%
+  add_recipe(recipe_benchmark)
+en_params <- hardhat::extract_parameter_set_dials(en_model)
+en_grid <- grid_regular(en_params, levels = 15)
+
+
+en_tuned <- en_workflow %>%
+  tune_grid(folds, grid = en_grid)
+
+en_workflow_tuned <- en_workflow %>%
+  finalize_workflow(select_best(en_tuned, metric = "rmse"))
+
+
+en_fit_folds <- fit_resamples(
+  en_workflow_tuned, 
+  resamples = folds,
+  control = control_grid(save_pred = T)
+)
+
+total_model_results <- en_fit_folds %>%
+  collect_predictions() %>%
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y))  %>%
+  rmse(truth = y,
+       estimate = .pred) %>%
+  mutate(var = "benchmark") %>%
+  select(var, .estimate)
+
+
+
+print(total_model_results)
+
+
+value_total_insertion <- rbind(value_total_insertion,total_model_results)
+print(value_total_insertion)
+
+
+## For Loop Start
+for (i in colnames(insert)) {
+  
+
+  f <- ff
+  f <- c(ff,i)
+
+  
+  train_insertion <- train %>% select(all_of(f), y)
+  
+  
+  
+  
+  recipe_insertion <- recipe(y ~ .,
+                            train_insertion)
+  
+  
+  
+  en_model <- linear_reg(mixture = tune(), 
+                         penalty = tune()
+                         ) %>%
+    set_engine("glmnet")
+  
+  en_workflow <- workflow() %>%
+    add_model(en_model) %>%
+    add_recipe(recipe_insertion)
+  en_params <- hardhat::extract_parameter_set_dials(en_model)
+  en_grid <- grid_regular(en_params, levels = 15)
+  
+  
+  en_tuned <- en_workflow %>%
+    tune_grid(folds, grid = en_grid)
+  
+  en_workflow_tuned <- en_workflow %>%
+    finalize_workflow(select_best(en_tuned, metric = "rmse"))
+  
+  
+  en_fit_folds <- fit_resamples(
+    en_workflow_tuned, 
+    resamples = folds,
+    control = control_grid(save_pred = T)
+  )
+  
+  total_model_results <- en_fit_folds %>%
+    collect_predictions() %>%
+    select(.pred, y) %>%
+    mutate(.pred = exp(.pred),
+           y = exp(y))  %>%
+    rmse(truth = y,
+         estimate = .pred) %>%
+    mutate(var = i) %>%
+    select(var, .estimate)
+  
+  
+  
+  print(total_model_results)
+  
+  
+  value_total_insertion <- rbind(value_total_insertion,total_model_results)
+  print(value_total_insertion)
+  
+}
+# Adding the features selected from insertion process---- 
+ff_new <- c(ff,(value_total_insertion %>% arrange(desc(.estimate)))[1:10,]$var)
+
+
+```
+
+### Recursive Deletion
+
+```{r, warning=FALSE, message=FALSE,eval=FALSE}
+value_total_deletion <- tibble(var = character(), mean = numeric())
+
+for (i in ff_new) {
+  
+
+  fv <- ff_new
+  fv <- fv[fv != i]
+  
+  
+  train_deletion <- train %>% select(all_of(fv), y)
+  
+  
+
+  
+  recipe_deletion <- recipe(y ~ .,
+                            train_deletion)
+  
+  
+  en_model <- linear_reg(mixture = tune(), penalty = tune()) %>%
+    set_engine("glmnet")
+  
+  en_workflow <- workflow() %>%
+    add_model(en_model) %>%
+    add_recipe(recipe_deletion)
+  en_params <- hardhat::extract_parameter_set_dials(en_model)
+  en_grid <- grid_regular(en_params, levels = 15)
+  
+  
+  en_tuned <- en_workflow %>%
+    tune_grid(folds, grid = en_grid)
+  
+  en_workflow_tuned <- en_workflow %>%
+    finalize_workflow(select_best(en_tuned, metric = "rmse"))
+  
+  
+  en_fit_folds <- fit_resamples(
+    en_workflow_tuned, 
+    resamples = folds,
+    control = control_grid(save_pred = T)
+  )
+  
+  total_model_results<- en_fit_folds %>%
+    collect_predictions() %>%
+    select(.pred, y)  %>%
+    mutate(.pred = exp(.pred),
+           y = exp(y))  %>%
+    rmse(truth = y,
+         estimate = .pred) %>%
+    mutate(var = "benchmark") %>%
+    select(var, .estimate)
+  
+  
+  
+  print(total_model_results)
+  
+  
+  value_total_deletion <- rbind(value_total_deletion,total_model_results)
+  print(value_total_deletion)
+  
+}
+
+
+
+
+# Final Feature Selection ----
+delete<- (value_total_deletion %>% arrange(desc(.estimate)))$var[1:8]
+
+ff_final <- ff_new[! ff_new %in% delete]
+
+```
+
+### PCA Insertion
+
+```{r, warning=FALSE,message=FALSE,eval=FALSE}
+pca_data <- train %>% select(-all_of(ff_final))
+
+train_pca <- pca_data %>% 
+  select(-y) %>%
+  scale() %>% # Standardize the variables
+  prcomp() 
+
+
+pca_obj<-as_tibble(train_pca$x)
+
+
+train <- cbind(train, pca_obj %>% select(PC1,PC2,PC3))
+
+```
+
+### Final Feature and Training data set
+
+```{r, warning=FALSE,message=FALSE,eval=FALSE}
+train_final <- train %>% select(all_of(lasso_tidy$term),y) %>% select(-PC1)
+```
+
+```{r, warning = FALSE, message=FALSE}
+set.seed(3013)
+pca_train <- read_csv('data/pca_train.csv') %>% mutate(x516 = as_factor(x516))
+pca_test <- read_csv('data/pca_test.csv') %>% mutate(x516 = as_factor(x516))
+id <- (read_csv('data/test.csv'))$id %>% as_tibble()
+
+# Final features that were used in our analysis
+colnames(pca_train)
+```
+\ 
+These were the final data sets used when training and fitting our models. We are having a reproducibility issue as of right now. The above feature selection illustrates our process, however it is producing divergent results than it did when we first completed the analysis a month ago. 
+\ 
+
+We spent a large portion of our time optimizing feature selection. Given the many different ways of performing feature selection, we thought to try as many as possible to offer a robust selection of features. Our group noticed that many of the columns were duplicated or were randomly created from our EDA and data cleaning process. This made our group want to start with a small amount of features and slowly increase the number of features used in our recipes. This inclination was furthered when the correlation matrix resulted in many of the variables having very little correlation with the outcome variable. 
+\ 
+
+The first step of our robust feature selection process was the creation of a correlation vector that described each variables correlation with the outcome variable. The magnitudes of the correlations were the only relevant aspect of our analysis, as the direction of the correlation does not affect their relevance as variables in prediction. The top 25 variables were selected.
+\ 
+
+Next, a lasso fit was completed to see which variables had the greatest regularized effect size on the outcome variable. The 25 variables with the largest absolute value of the effect size were selected.
+\ 
+
+Lastly, we preformed three separate feature importance calculations using the SVM RBF, boosted tree, and random forest. The 25 most important variables from these three separate analyses were selected and stored.
+\ 
+
+
+
+
+
+## Developing the Model
+### Training individual models
+```{r, message=FALSE,warning=FALSE,eval=FALSE}
+fv <-
+  c(
+    'x105',
+    'x102',
+    'x561',
+    'x696',
+    'x567',
+    'x111',
+    'x369',
+    'x516',
+    'x654',
+    'x685',
+    'x591',
+    'x585',
+    "x619",
+    'x118',
+    'x652',
+    'x114',
+    'x358',
+    'x366',
+    'x506',
+    'x532',
+    'x668',
+    'x168'
+  )
+
+
+
+train <-
+  read_csv("data/train_cleaned.csv") %>% mutate(x516 = as_factor(x516))
+pca_train <-
+  read_csv('data/pca_train.csv') %>% mutate(x516 = as_factor(x516))
+folds <- read_rds('model selection/model_objects/folds.rds')
+folds_pca <-
+  read_rds('model selection/model_objects/folds_pca.rds')
+ctrl_grid <- read_rds("model selection/model_objects/ctrl_grid.rds")
+
+
+
+
+recipe <- recipe(y ~ .,
+                 train) %>%
+  step_rm(id) %>%
+  step_impute_mode(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_nzv(all_numeric_predictors()) %>%
+  step_corr(all_numeric_predictors()) %>%
+  step_impute_knn(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+
+peek <- recipe %>% prep() %>% bake(train)
+
+recipe_pca <- recipe(y ~ .,
+                     pca_train) %>%
+  step_rm(id) %>%
+  step_impute_mode(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_nzv(all_numeric_predictors()) %>%
+  step_corr(all_numeric_predictors()) %>%
+  step_impute_knn(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+
+peek_pca <- recipe %>% prep() %>% bake(pca_train)
+
+
+
+# Boosted Tree ----
+
+bt_model <- boost_tree(
+  mode = "regression",
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("xgboost")
+
+
+bt_params <- hardhat::extract_parameter_set_dials(bt_model) %>%
+  update(mtry = mtry(c(1, 22)))
+
+bt_grid <- grid_regular(bt_params, levels = 5)
+
+bt_workflow <- workflow() %>%
+  add_model(bt_model) %>%
+  add_recipe(recipe)
+
+bt_tuned <- bt_workflow %>%
+  tune_grid(resamples = folds,
+            grid = bt_grid,
+            control = ctrl_grid)
+
+#write_rds(bt_tuned, "model selection/model_objects/bt_tuned.rds")
+
+bt_workflow_tuned <- bt_workflow %>%
+  finalize_workflow(select_best(bt_tuned, metric = "rmse"))
+
+
+
+bt_fit_folds <- fit_resamples(bt_workflow_tuned,
+                              resamples = folds,
+                              control = control_grid(save_pred = T))
+
+
+
+
+bt_fit_folds %>%
+  collect_predictions() %>%
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y))  %>%
+  rmse(truth = y,
+       estimate = .pred)
+
+
+
+
+bt_fit_folds %>%
+  collect_metrics() %>%
+  mutate(model = "Boosted Tree") %>%
+  filter(.metric == "rmse")
+
+
+
+bt_model_pca <- boost_tree(
+  mode = "regression",
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("xgboost")
+
+
+# Boosted Tree PCA ----
+bt_params_pca <-
+  hardhat::extract_parameter_set_dials(bt_model_pca) %>%
+  update(mtry = mtry(c(1, 28)))
+
+bt_grid_pca <- grid_regular(bt_params_pca, levels = 5)
+
+bt_workflow_pca <- workflow() %>%
+  add_model(bt_model_pca) %>%
+  add_recipe(recipe_pca)
+
+bt_tuned_pca <- bt_workflow_pca %>%
+  tune_grid(resamples = folds_pca,
+            grid = bt_grid_pca,
+            control = ctrl_grid)
+
+#write_rds(bt_tuned_pca, "model selection/model_objects/bt_tuned_pca.rds")
+
+
+bt_workflow_tuned_pca <- bt_workflow_pca %>%
+  finalize_workflow(select_best(bt_tuned_pca, metric = "rmse"))
+
+
+
+bt_fit_folds_pca <- fit_resamples(bt_workflow_tuned_pca,
+                                  resamples = folds_pca,
+                                  control = control_grid(save_pred = T))
+
+
+
+
+bt_fit_folds_pca %>%
+  collect_predictions() %>%
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y))  %>%
+  rmse(truth = y,
+       estimate = .pred)
+
+
+
+
+bt_fit_folds_pca %>%
+  collect_metrics() %>%
+  mutate(model = "Boosted Tree PCA") %>%
+  filter(.metric == "rmse")
+
+
+
+
+
+# Single Layer Neural Network ----
+nn_model <- mlp(
+  hidden_units = tune(),
+  penalty = tune(),
+  epochs = tune(),
+  mode = 'regression'
+)
+
+nn_params <- hardhat::extract_parameter_set_dials(nn_model)
+
+nn_grid <- grid_regular(nn_params, levels = 5)
+
+nn_workflow <- workflow() %>%
+  add_model(nn_model) %>%
+  add_recipe(recipe)
+
+nn_tuned <- nn_workflow %>%
+  tune_grid(resamples = folds,
+            grid = nn_grid,
+            control = ctrl_grid)
+
+
+#write_rds(nn_tuned, "model selection/model_objects/nn_tuned.rds")
+
+
+nn_workflow_tuned <- nn_workflow %>%
+  finalize_workflow(select_best(nn_tuned, metric = "rmse"))
+
+
+
+nn_fit_folds <- fit_resamples(nn_workflow_tuned,
+                              resamples = folds,
+                              control = control_grid(save_pred = T))
+
+
+
+
+nn_fit_folds %>%
+  collect_predictions() %>%
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y))  %>%
+  rmse(truth = y,
+       estimate = .pred)
+
+
+
+
+nn_fit_folds %>%
+  collect_metrics() %>%
+  mutate(model = "Neural Network") %>%
+  filter(.metric == "rmse")
+
+
+
+# Single Layer Neural Network PCA ----
+nn_model_pca <- mlp(
+  hidden_units = tune(),
+  penalty = tune(),
+  epochs = tune(),
+  mode = 'regression'
+)
+
+nn_params_pca <- hardhat::extract_parameter_set_dials(nn_model_pca)
+
+nn_grid_pca <- grid_regular(nn_params_pca, levels = 5)
+
+nn_workflow_pca <- workflow() %>%
+  add_model(nn_model_pca) %>%
+  add_recipe(recipe_pca)
+
+nn_tuned_pca <- nn_workflow_pca %>%
+  tune_grid(resamples = folds_pca,
+            grid = nn_grid_pca,
+            control = ctrl_grid)
+
+#write_rds(nn_tuned_pca, "model selection/model_objects/nn_tuned_pca.rds")
+
+
+nn_workflow_tuned_pca <- nn_workflow_pca %>%
+  finalize_workflow(select_best(nn_tuned_pca, metric = "rmse"))
+
+
+
+nn_fit_folds_pca <- fit_resamples(nn_workflow_tuned_pca,
+                                  resamples = folds_pca,
+                                  control = control_grid(save_pred = T))
+
+
+
+
+nn_fit_folds_pca %>%
+  collect_predictions() %>%
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y))  %>%
+  rmse(truth = y,
+       estimate = .pred)
+
+
+
+nn_fit_folds_pca %>%
+  collect_metrics() %>%
+  mutate(model = "Neural Network PCA") %>%
+  filter(.metric == "rmse")
+
+
+
+
+
+# Cube Model ---- 
+cube_model <- parsnip::cubist_rules(
+  committees = tune(),
+  neighbors = tune()
+)
+
+
+
+cube_params <- hardhat::extract_parameter_set_dials(cube_model) %>%
+  update(neighbors = neighbors(c(5,40)),
+         committees = committees(c(3,40))
+  )
+
+cube_grid <- grid_regular(cube_params, levels = 5)
+
+cube_workflow <- workflow() %>%
+  add_model(cube_model) %>%
+  add_recipe(recipe)
+
+cube_tuned <- cube_workflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = cube_grid,
+    control = ctrl_grid)
+
+#write_rds(cube_tuned, "model selection/model_objects/cube_tuned.rds")
+
+
+cube_workflow_tuned <- cube_workflow %>%
+  finalize_workflow(select_best(cube_tuned, metric = "rmse"))
+
+
+
+cube_fit_folds <- fit_resamples(
+  cube_workflow_tuned, 
+  resamples = folds,
+  control = control_grid(save_pred = T)
+)
+
+
+
+cube_fit_folds %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+cube_fit_folds %>% 
+  collect_metrics() %>%
+  mutate(model = "Cube") %>%
+  filter(.metric == "rmse") 
+
+
+
+# Cube model PCA ----
+cube_model_pca <- parsnip::cubist_rules(
+  committees = tune(),
+  neighbors = tune()
+)
+
+
+
+cube_params_pca <- hardhat::extract_parameter_set_dials(cube_model_pca) %>%
+  update(neighbors = neighbors(c(5,40)),
+         committees = committees(c(3,40))
+  )
+
+cube_grid_pca <- grid_regular(cube_params_pca, levels = 5)
+
+cube_workflow_pca <- workflow() %>%
+  add_model(cube_model_pca) %>%
+  add_recipe(recipe_pca)
+
+cube_tuned_pca <- cube_workflow_pca %>%
+  tune_grid(
+    resamples = folds_pca,
+    grid = cube_grid_pca,
+    control = ctrl_grid)
+
+#write_rds(cube_tuned_pca, "model selection/model_objects/cube_tuned_pca.rds")
+
+cube_workflow_tuned_pca <- cube_workflow_pca %>%
+  finalize_workflow(select_best(cube_tuned_pca, metric = "rmse"))
+
+
+
+cube_fit_folds_pca <- fit_resamples(
+  cube_workflow_tuned_pca, 
+  resamples = folds_pca,
+  control = control_grid(save_pred = T)
+)
+
+
+
+cube_fit_folds_pca %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+cube_fit_folds_pca %>%
+  collect_metrics() %>%
+  mutate(model = "Cube PCA") %>%
+  filter(.metric == "rmse")
+
+
+
+
+
+
+# svmpoly ----
+svmpoly_model <- svm_poly(
+  mode = "regression",
+  cost = tune(),
+  degree = tune(),
+) %>%
+  set_engine("kernlab")
+
+svmpoly_params <- hardhat::extract_parameter_set_dials(svmpoly_model)
+
+svmpoly_grid <- grid_regular(svmpoly_params, levels = 5)
+
+svmpoly_workflow <- workflow() %>%
+  add_model(svmpoly_model) %>%
+  add_recipe(recipe)
+
+svmpoly_tuned <- svmpoly_workflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = svmpoly_grid,
+    control = ctrl_grid
+  )
+
+
+#write_rds(svmpoly_tuned, "model selection/model_objects/svmpoly_tuned.rds")
+
+
+svmpoly_workflow_tuned <- svmpoly_workflow %>%
+  finalize_workflow(select_best(svmpoly_tuned, metric = "rmse"))
+
+
+
+
+
+
+svmpoly_fit_folds <- fit_resamples(
+  svmpoly_workflow_tuned, 
+  resamples = folds, 
+  control = control_grid(save_pred = T))
+
+
+
+svmpoly_fit_folds %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+
+
+
+svmpoly_fit_folds %>% 
+  collect_metrics() %>% 
+  mutate(model = "svmpoly") %>%
+  total_model_results %>% 
+  filter(.metric == "rmse")
+
+
+
+
+
+# svmpoly PCA ----
+
+svmpoly_model_pca <- svm_poly(
+  mode = "regression",
+  cost = tune(),
+  degree = tune(),
+) %>%
+  set_engine("kernlab")
+
+svmpoly_params_pca <- hardhat::extract_parameter_set_dials(svmpoly_model_pca)
+
+svmpoly_grid_pca <- grid_regular(svmpoly_params_pca, levels = 5)
+
+svmpoly_workflow_pca <- workflow() %>%
+  add_model(svmpoly_model_pca) %>%
+  add_recipe(recipe_pca)
+
+svmpoly_tuned_pca <- svmpoly_workflow_pca %>%
+  tune_grid(
+    resamples = folds_pca,
+    grid = svmpoly_grid_pca,
+    control = ctrl_grid
+  )
+
+
+#write_rds(svmpoly_tuned_pca, "model selection/model_objects/svmpoly_tuned_pca.rds")
+
+
+svmpoly_workflow_tuned_pca <- svmpoly_workflow_pca %>%
+  finalize_workflow(select_best(svmpoly_tuned, metric = "rmse"))
+
+
+
+
+
+
+svmpoly_fit_folds_pca <- fit_resamples(
+  svmpoly_workflow_tuned_pca, 
+  resamples = folds_pca, 
+  control = control_grid(save_pred = T))
+
+
+
+svmpoly_fit_folds_pca %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+svmpoly_fit_folds_pca %>% 
+  collect_metrics() %>% 
+  mutate(model = "svmpoly") %>%
+  total_model_results %>% 
+  filter(.metric == "rmse") 
+
+
+
+# bmlp ----
+bmlp_model <- bag_mlp(
+  hidden_units = tune(),
+  penalty = tune(),
+  epochs = tune(),
+  mode = 'regression'
+)
+
+bmlp_params <- hardhat::extract_parameter_set_dials(bmlp_model)
+
+bmlp_grid <- grid_regular(bmlp_params, levels = 5) 
+
+bmlp_workflow <- workflow() %>%
+  add_model(bmlp_model) %>%
+  add_recipe(recipe)
+
+bmlp_tuned <- bmlp_workflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = bmlp_grid,
+    control = ctrl_grid
+  )
+
+
+#write_rds(bmlp_tuned, "model selection/model_objects/bmlp_tuned.rds")
+
+
+bmlp_workflow_tuned <- bmlp_workflow %>%
+  finalize_workflow(select_best(bmlp_tuned, metric = "rmse"))
+
+
+
+bmlp_fit_folds <- fit_resamples(
+  bmlp_workflow_tuned, 
+  resamples = folds,
+  control = control_grid(save_pred = T)
+)
+
+
+
+
+bmlp_fit_folds %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+bmlp_fit_folds %>%
+  collect_metrics() %>%
+  mutate(model = "Bagged Neural Network") %>% 
+  filter(.metric == "rmse")
+
+
+
+
+
+# bmlp PCA ----
+bmlp_model_pca <- bag_mlp(
+  hidden_units = tune(),
+  penalty = tune(),
+  epochs = tune(),
+  mode = 'regression'
+)
+
+bmlp_params_pca <- hardhat::extract_parameter_set_dials(bmlp_model_pca)
+
+bmlp_grid_pca <- grid_regular(bmlp_params_pca, levels = 5) 
+
+bmlp_workflow_pca <- workflow() %>%
+  add_model(bmlp_model_pca) %>%
+  add_recipe(recipe_pca)
+
+bmlp_tuned_pca <- bmlp_workflow_pca %>%
+  tune_grid(
+    resamples = folds_pca,
+    grid = bmlp_grid_pca,
+    control = ctrl_grid
+  )
+
+
+#write_rds(bmlp_tuned_pca, "model selection/model_objects/bmlp_tuned_pca.rds")
+
+
+bmlp_workflow_tuned_pca <- bmlp_workflow_pca %>%
+  finalize_workflow(select_best(bmlp_tuned_pca, metric = "rmse"))
+
+
+
+bmlp_fit_folds_pca <- fit_resamples(
+  bmlp_workflow_tuned_pca, 
+  resamples = folds_pca,
+  control = control_grid(save_pred = T)
+)
+
+
+
+
+bmlp_fit_folds_pca %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+bmlp_fit_folds_pca %>%
+  collect_metrics() %>%
+  mutate(model = "bmlp") %>% 
+  filter(.metric == "rmse")
+
+
+
+
+#svm rbf ----
+svm_model <- svm_rbf(
+  mode = "regression",
+  cost = tune(),
+  rbf_sigma = tune()
+) %>%
+  set_engine("kernlab")
+
+svm_params <- hardhat::extract_parameter_set_dials(svm_model)
+
+svm_grid <- grid_regular(svm_params, levels = 5)
+
+svm_workflow <- workflow() %>%
+  add_model(svm_model) %>%
+  add_recipe(recipe)
+
+svm_tuned <- svm_workflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = svm_grid, 
+    control = ctrl_grid
+  )
+
+#write_rds(svm_tuned, "model selection/model_objects/svm_tuned.rds")
+
+
+svm_workflow_tuned <- svm_workflow %>%
+  finalize_workflow(select_best(svm_tuned, metric = "rmse"))
+
+
+svm_fit_folds <- fit_resamples(
+  svm_workflow_tuned, 
+  resamples = folds,
+  control = control_grid(save_pred = T)
+)
+
+svm_fit_folds %>%
+  collect_predictions() %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)) %>%
+  rmse(truth = y, estimate = .pred)
+
+svm_fit_folds %>%
+  collect_metrics() %>%
+  mutate(model = "SVM RBF") %>% 
+  filter(.metric == "rmse") 
+
+
+
+# svm rbf PCA ----
+svm_model_pca <- svm_rbf(
+  mode = "regression",
+  cost = tune(),
+  rbf_sigma = tune()
+) %>%
+  set_engine("kernlab")
+
+svm_params_pca <- hardhat::extract_parameter_set_dials(svm_model_pca)
+
+svm_grid_pca <- grid_regular(svm_params_pca, levels = 5)
+
+svm_workflow_pca <- workflow() %>%
+  add_model(svm_model_pca) %>%
+  add_recipe(recipe_pca)
+
+svm_tuned_pca <- svm_workflow_pca %>%
+  tune_grid(
+    resamples = folds_pca,
+    grid = svm_grid_pca,
+    control = ctrl_grid
+  )
+
+#write_rds(svm_tuned_pca, "model selection/model_objects/svm_tuned_pca.rds")
+
+
+svm_workflow_tuned_pca <- svm_workflow_pca %>%
+  finalize_workflow(select_best(svm_tuned_pca, metric = "rmse"))
+
+
+svm_fit_folds_pca <- fit_resamples(
+  svm_workflow_tuned_pca, 
+  resamples = folds_pca,
+  control = control_grid(save_pred = T)
+)
+
+svm_fit_folds_pca %>%
+  collect_predictions() %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)) %>%
+  rmse(truth = y, estimate = .pred)
+
+svm_fit_folds_pca %>% 
+  collect_metrics() %>% 
+  mutate(model = "SVM RBF PCA") %>% 
+  filter(.metric == "rmse") 
+
+
+
+
+# knn ----
+knn_model <- nearest_neighbor(
+  mode = "regression",
+  neighbors = tune()
+) %>%
+  set_engine("kknn")
+
+
+
+knn_params <- hardhat::extract_parameter_set_dials(knn_model) %>%
+  update(neighbors = neighbors(range = c(1,100)))
+
+knn_grid <- grid_regular(knn_params, levels = 15)
+
+knn_workflow <- workflow() %>%
+  add_model(knn_model) %>%
+  add_recipe(recipe)
+
+knn_tuned <- knn_workflow %>%
+  tune_grid(folds, 
+            grid = knn_grid,
+            control = ctrl_grid
+  )
+
+#write_rds(knn_tuned, "model selection/model_objects/knn_tuned.rds")
+
+
+knn_workflow_tuned <- knn_workflow %>%
+  finalize_workflow(select_best(knn_tuned, metric = "rmse"))
+
+
+
+knn_fit_folds <- fit_resamples(
+  knn_workflow_tuned, 
+  resamples = folds, 
+  control = control_grid(save_pred = T))
+
+
+
+knn_fit_folds %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+knn_fit_folds %>% 
+  collect_metrics() %>% 
+  mutate(model = "knn") %>% 
+  filter(.metric == "rmse")
+
+
+
+
+# knn PCA ----
+knn_model_pca <- nearest_neighbor(
+  mode = "regression",
+  neighbors = tune()
+) %>%
+  set_engine("kknn")
+
+
+
+knn_params_pca <- hardhat::extract_parameter_set_dials(knn_model_pca) %>%
+  update(neighbors = neighbors(range = c(1,100)))
+
+knn_grid_pca <- grid_regular(knn_params_pca, levels = 15)
+
+knn_workflow_pca <- workflow() %>%
+  add_model(knn_model_pca) %>%
+  add_recipe(recipe_pca)
+
+knn_tuned_pca <- knn_workflow_pca %>%
+  tune_grid(folds_pca, 
+            grid = knn_grid_pca,
+            control = ctrl_grid
+  )
+
+#write_rds(knn_tuned_pca, "model selection/model_objects/knn_tuned_pca.rds")
+
+
+
+knn_workflow_tuned_pca <- knn_workflow_pca %>%
+  finalize_workflow(select_best(knn_tuned_pca, metric = "rmse"))
+
+
+
+knn_fit_folds_pca <- fit_resamples(
+  knn_workflow_tuned_pca, 
+  resamples = folds_pca, 
+  control = control_grid(save_pred = T))
+
+
+
+knn_fit_folds_pca %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+
+
+knn_fit_folds_pca %>%
+  collect_metrics() %>%
+  mutate(model = "knn PCA")%>% 
+  filter(.metric == "rmse")
+
+
+
+
+
+
+# rf ----
+
+rf_model <- rand_forest(
+  mode = "regression",
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger")
+
+
+
+rf_params <- hardhat::extract_parameter_set_dials(rf_model)%>% 
+  update(mtry = mtry(c(1, 22))) 
+
+rf_grid <- grid_regular(rf_params, levels = 5)
+
+rf_workflow <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(recipe)
+
+rf_tuned <- rf_workflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = rf_grid,
+    control = ctrl_grid
+  )
+#write_rds(rf_tuned, "model selection/model_objects/rf_tuned.rds")
+
+
+rf_workflow_tuned <- rf_workflow %>%
+  finalize_workflow(select_best(rf_tuned, metric = "rmse"))
+
+
+rf_fit_folds <- fit_resamples(
+  rf_workflow_tuned, 
+  resamples = folds,
+  control = control_grid(save_pred = T)
+)
+
+
+
+rf_fit_folds %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+
+rf_fit_folds %>%
+  collect_metrics() %>% 
+  mutate(model = "Random Forests") %>%
+  filter(.metric == "rmse")
+
+
+
+
+# rf PCA ----
+rf_model_pca <- rand_forest(
+  mode = "regression",
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger")
+
+
+
+rf_params_pca <- hardhat::extract_parameter_set_dials(rf_model_pca)%>% 
+  update(mtry = mtry(c(1, 22))) 
+
+rf_grid_pca <- grid_regular(rf_params_pca, levels = 5)
+
+rf_workflow_pca <- workflow() %>%
+  add_model(rf_model_pca) %>%
+  add_recipe(recipe_pca)
+
+rf_tuned_pca <- rf_workflow %>%
+  tune_grid(
+    resamples = folds_pca,
+    grid = rf_grid_pca,
+    control = ctrl_grid
+  )
+
+write_rds(rf_tuned_pca, 'model selection/model_objects/rf_tuned_pca.rds')
+
+rf_workflow_tuned_pca <- rf_workflow_pca %>%
+  finalize_workflow(select_best(rf_tuned_pca, metric = "rmse"))
+
+
+rf_fit_folds_pca <- fit_resamples(
+  rf_workflow_tuned_pca, 
+  resamples = folds_pca,
+  control = control_grid(save_pred = T)
+)
+
+
+
+rf_fit_folds_pca %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+
+rf_fit_folds_pca %>%
+  collect_metrics() %>%
+  mutate(model = "Random Forests") %>%
+  filter(.metric == "rmse")
+
+
+
+# Elastic Net ----
+en_model <- linear_reg(
+  mixture = tune(),
+  penalty = tune(),
+  mode = "regression",
+) %>%
+  set_engine("glmnet")
+
+en_params <- hardhat::extract_parameter_set_dials(en_model)
+
+en_grid <- grid_regular(en_params, levels = 5)
+
+en_workflow <- workflow() %>%
+  add_model(en_model) %>%
+  add_recipe(recipe)
+
+en_tuned <- en_workflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = en_grid,
+    control = ctrl_grid)
+
+#write_rds(en_tuned, "model selection/model_objects/en_tuned.rds")
+
+
+
+en_workflow_tuned <- en_workflow %>%
+  finalize_workflow(select_best(en_tuned, metric = "rmse"))
+
+
+
+en_fit_folds <- fit_resamples(
+  en_workflow_tuned, 
+  resamples = folds, 
+  control = control_grid(save_pred = T))
+
+
+
+en_fit_folds %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+# Elastic Net PCA ----
+en_model_pca <- linear_reg(
+  mixture = tune(),
+  penalty = tune(),
+  mode = "regression",
+) %>%
+  set_engine("glmnet")
+
+en_params_pca <- hardhat::extract_parameter_set_dials(en_model_pca)
+
+en_grid_pca <- grid_regular(en_params_pca, levels = 5)
+
+en_workflow_pca <- workflow() %>%
+  add_model(en_model_pca) %>%
+  add_recipe(recipe_pca)
+
+en_tuned_pca <- en_workflow_pca %>%
+  tune_grid(
+    resamples = folds_pca,
+    grid = en_grid_pca,
+    control = ctrl_grid)
+
+#write_rds(en_tuned_pca, "model selection/model_objects/en_tuned_pca.rds")
+
+
+
+en_workflow_tuned_pca <- en_workflow_pca %>%
+  finalize_workflow(select_best(en_tuned_pca, metric = "rmse"))
+
+
+
+en_fit_folds_pca <- fit_resamples(
+  en_workflow_tuned_pca, 
+  resamples = folds_pca, 
+  control = control_grid(save_pred = T))
+
+
+
+en_fit_folds_pca %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+
+en_fit_folds_pca %>% 
+  collect_metrics() %>%
+  mutate(model = "Elastic Net PCA") %>%
+  filter(.metric == "rmse")
+
+
+
+
+
+# Linear Model ----
+lm_model <- linear_reg() %>%
+  set_engine("lm")
+
+lm_workflow <- workflow() %>%
+  add_model(lm_model) %>%
+  add_recipe(recipe)
+
+
+lm_fit_folds <- fit_resamples(
+  lm_workflow, 
+  resamples = folds, 
+  control = control_grid(save_pred = T))
+
+
+
+lm_fit_folds %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+lm_fit_folds %>% 
+  collect_metrics() %>% 
+  mutate(model = "Linear Model") %>%
+  filter(.metric == "rmse")
+
+
+
+# Linear Model PCA ----
+lm_model_pca <- linear_reg() %>%
+  set_engine("lm")
+
+lm_workflow_pca <- workflow() %>%
+  add_model(lm_model_pca) %>%
+  add_recipe(recipe_pca)
+
+
+lm_fit_folds_pca <- fit_resamples(
+  lm_workflow_pca, 
+  resamples = folds_pca, 
+  control = control_grid(save_pred = T))
+
+
+
+lm_fit_folds_pca %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+lm_fit_folds_pca %>% 
+  collect_metrics() %>% 
+  mutate(model = "Linear Model PCA") %>%
+  filter(.metric == "rmse")
+
+
+
+# Lasso Model ----
+
+lasso_model <- linear_reg(mixture = 1, penalty = .01) %>%
+  set_engine("glmnet")
+
+lasso_workflow <- workflow() %>%
+  add_model(lasso_model) %>%
+  add_recipe(recipe)
+
+
+lasso_fit_folds <- fit_resamples(
+  lasso_workflow, 
+  resamples = folds, 
+  control = control_grid(save_pred = T))
+
+
+
+lasso_fit_folds %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+lasso_fit_folds %>%
+  collect_metrics() %>%
+  mutate(model = "Lasso") %>%
+  filter(.metric == "rmse")
+
+
+
+
+# Lasso Model PCA ----
+
+lasso_model_pca <- linear_reg(mixture = 1, penalty = .01) %>%
+  set_engine("glmnet")
+
+lasso_workflow_pca <- workflow() %>%
+  add_model(lasso_model_pca) %>%
+  add_recipe(recipe_pca)
+
+
+lasso_fit_folds_pca <- fit_resamples(
+  lasso_workflow_pca, 
+  resamples = folds_pca, 
+  control = control_grid(save_pred = T))
+
+
+
+lasso_fit_folds_pca %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+lasso_fit_folds_pca %>%
+  collect_metrics() %>%
+  mutate(model = "Lasso Model PCA") %>%
+  filter(.metric == "rmse")
+
+
+
+
+# Bag Tree ----
+
+bag_tree_model <- bag_tree(
+  cost_complexity = tune(),
+  tree_depth = tune(),
+  min_n = tune(),
+  mode = 'regression'
+)
+
+bag_tree_params <- hardhat::extract_parameter_set_dials(bag_tree_model)
+
+bag_tree_grid <- grid_regular(bag_tree_params, levels = 5) 
+
+bag_tree_workflow <- workflow() %>%
+  add_model(bag_tree_model) %>%
+  add_recipe(recipe)
+
+bag_tree_tuned <- bag_tree_workflow %>%
+  tune_grid(
+    resamples = folds,
+    grid = bag_tree_grid,
+    control = ctrl_grid
+  )
+
+
+#write_rds(bag_tree_tuned, "model selection/model_objects/bag_tree_tuned.rds")
+
+
+ba_tree_workflow_tuned <- bag_tree_workflow %>%
+  finalize_workflow(select_best(bag_tree_tuned, metric = "rmse"))
+
+
+
+bag_tree_fit_folds <- fit_resamples(
+  bag_tree_workflow_tuned, 
+  resamples = folds,
+  control = control_grid(save_pred = T)
+)
+
+
+
+
+bag_tree_fit_folds %>% 
+  collect_predictions() %>% 
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y)
+  )  %>%
+  rmse(truth = y,
+       estimate = .pred
+  )
+
+
+bag_tree_fit_folds %>%
+  collect_metrics() %>%
+  mutate(model = "Bag Tree") %>% 
+  filter(.metric == "rmse")
+
+
+
+# Bag Tree PCA ----
+bag_tree_model_pca <- bag_tree(
+  cost_complexity = tune(),
+  tree_depth = tune(),
+  min_n = tune(),
+  mode = 'regression'
+)
+
+bag_tree_params_pca <- hardhat::extract_parameter_set_dials(bag_tree_model_pca)
+
+bag_tree_grid_pca <- grid_regular(bag_tree_params_pca, levels = 5) 
+
+bag_tree_workflow_pca <- workflow() %>%
+  add_model(bag_tree_model_pca) %>%
+  add_recipe(recipe_pca)
+
+bag_tree_tuned_pca <- bag_tree_workflow_pca %>%
+  tune_grid(
+    resamples = folds_pca,
+    grid = bag_tree_grid_pca,
+    control = ctrl_grid
+  )
+
+
+#write_rds(bag_tree_tuned_pca, "model selection/model_objects/bag_tree_tuned_pca.rds")
+
+
+
+bag_tree_workflow_tuned_pca <- bag_tree_workflow_pca %>%
+  finalize_workflow(select_best(bag_tree_tuned_pca, metric = "rmse"))
+
+
+
+bag_tree_fit_folds_pca <- fit_resamples(
+  bag_tree_workflow_tuned_pca,
+  resamples = folds_pca,
+  control = control_grid(save_pred = T)
+)
+
+
+
+
+
+bag_tree_fit_folds_pca %>%
+  collect_predictions() %>%
+  select(.pred, y) %>%
+  mutate(.pred = exp(.pred),
+         y = exp(y))  %>%
+  rmse(truth = y,
+       estimate = .pred)
+
+
+bag_tree_fit_folds_pca %>%
+  collect_metrics() %>%
+  mutate(model = "bag tree") %>% 
+  filter(.metric == "rmse")
+```
+
+### Creating the ensemble model
+```{r,warning=FALSE,message=FALSE, eval = FALSE}
+bt_tuned_pca <- read_rds('model selection/model_objects/bt_tuned_pca.rds')
+nn_tuned_pca <- read_rds('model selection/model_objects/nn_tuned_pca.rds')
+svm_tuned_pca <- read_rds('model selection/model_objects/svm_tuned_pca.rds')
+bag_mars_tuned_pca <- read_rds('model selection/model_objects/bag_mars_tuned_pca.rds')
+bag_tree_tuned_pca <- read_rds('model selection/model_objects/bag_tree_tuned_pca.rds')
+bmlp_tuned_pca <- read_rds('model selection/model_objects/bmlp_tuned_pca.rds')
+cube_tuned_pca <- read_rds('model selection/model_objects/cube_tuned_pca.rds')
+en_tuned_pca <- read_rds('model selection/model_objects/en_tuned_pca.rds')
+mars_tuned_pca <- read_rds('model selection/model_objects/mars_tuned_pca.rds')
+rf_tuned_pca <- read_rds('model selection/model_objects/rf_tuned_pca.rds')
+
+
+
+
+ensemble_model_pca <- 
+  stacks() %>%
+  add_candidates(svm_tuned_pca) %>%
+  add_candidates(nn_tuned_pca) %>%
+  add_candidates(bt_tuned_pca) %>%  
+ # add_candidates(bag_mars_tuned_pca) %>%
+ # add_candidates(bag_tree_tuned_pca) %>%
+  #add_candidates(bmlp_tuned_pca) %>%
+  #add_candidates(cube_tuned_pca) %>%
+  #add_candidates(en_tuned_pca) %>% 
+ # add_candidates(mars_tuned_pca) %>%
+  add_candidates(rf_tuned_pca)
+
+# Fit the stack ----
+# penalty values for blending (set penalty argument when blending)
+blend_penalty <- c(10^(-6:-1), 0.5, 1, 1.5, 2)
+
+# Blend predictions using penalty defined above (tuning step, set seed)
+set.seed(9876)
+ensemble_st_pca <-
+  ensemble_model_pca %>%
+  blend_predictions(penalty = blend_penalty)
+
+
+# ensemble_workflow <- workflow() %>%
+#   add_model(ensemble_st)
+
+ensemble_fit_pca <-
+  ensemble_st_pca %>%
+  fit_members()
+
+
+theme_set(theme_bw())
+autoplot(ensemble_fit_pca)
+autoplot(ensemble_fit_pca, type = "members")
+autoplot(ensemble_fit_pca, type = "weights")
+
+
+ensemble_test_pca <-
+  pca_test %>%
+  bind_cols(predict(ensemble_fit_pca, .))
+
+
+
+ prediction <- cbind(id, ensemble_test_pca)%>%
+   select(value, .pred) %>%
+   rename(y = .pred, id = value) %>%
+   mutate(y = exp(y),
+          y = y + 2
+          )
+
+
+ #write_csv(prediction, 'predictions/final_prediction2.csv')
+
+
+
+```
+
+## Discussion
+
+## Conclusion
